@@ -53,19 +53,19 @@ test('allow returns an empty decision object', async () => {
   assert.deepEqual(out, {})
 })
 
-test('deny carries both output vocabularies with the policy reason', async () => {
+test('deny is a hookSpecificOutput permissionDecision with the policy reason', async () => {
   nextResponse = { decision: 'deny', reason: 'dangerous delete' }
   const { out } = await decide(preCall, env())
-  assert.equal(out.decision, 'deny')
-  assert.equal(out.permissionDecision, 'deny')
-  assert.match(out.permissionDecisionReason, /dangerous delete/)
+  assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse')
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /dangerous delete/)
 })
 
 test('ask maps to the ask decision', async () => {
   nextResponse = { decision: 'ask', reason: 'needs a human' }
   const { out } = await decide(preCall, env())
-  assert.equal(out.decision, 'ask')
-  assert.match(out.reason, /needs a human/)
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'ask')
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /needs a human/)
 })
 
 test('gateway payload carries tool, session, event, and tier', async () => {
@@ -79,27 +79,41 @@ test('gateway payload carries tool, session, event, and tier', async () => {
   assert.equal(requests[0].body.agent_tier, 'subagent')
 })
 
-test('PermissionRequest resolves against the same pre-call endpoint', async () => {
-  nextResponse = { decision: 'ask', reason: 'hold' }
+test('PermissionRequest: policy deny settles the approval, ask stays out of the way', async () => {
+  nextResponse = { decision: 'deny', reason: 'not in this workspace' }
   requests.length = 0
-  const { out } = await decide({ ...preCall, hook_event_name: 'PermissionRequest' }, env())
+  const denied = await decide({ ...preCall, hook_event_name: 'PermissionRequest' }, env())
   assert.equal(requests[0].path, '/govern/tool-use')
-  assert.equal(out.decision, 'ask')
+  assert.equal(denied.out.hookSpecificOutput.decision.behavior, 'deny')
+  assert.match(denied.out.hookSpecificOutput.decision.message, /not in this workspace/)
+
+  nextResponse = { decision: 'ask', reason: 'hold' }
+  const asked = await decide({ ...preCall, hook_event_name: 'PermissionRequest' }, env())
+  assert.deepEqual(asked.out, {})
 })
 
 test('unreachable gateway fails OPEN on interactive tier with a loud warning', async () => {
   failMode = 'refuse'
   const { out, warn } = await decide(preCall, env({ ACP_AGENT_TIER: 'interactive' }))
-  assert.deepEqual(out, {})
+  assert.match(out.systemMessage, /UNGOVERNED/)
+  assert.equal(out.hookSpecificOutput, undefined)
   assert.match(warn, /UNGOVERNED/)
+  failMode = null
+})
+
+test('permission_mode never resolves to the unattended tier', async () => {
+  failMode = 'refuse'
+  const { out } = await decide({ ...preCall, permission_mode: 'never' }, env())
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /fail-closed/)
   failMode = null
 })
 
 test('unreachable gateway fails CLOSED on background tier', async () => {
   failMode = 'refuse'
   const { out } = await decide(preCall, env({ ACP_AGENT_TIER: 'background' }))
-  assert.equal(out.decision, 'deny')
-  assert.match(out.reason, /fail-closed/)
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /fail-closed/)
   failMode = null
 })
 
@@ -107,7 +121,7 @@ test('an HTTP error status is not retried', async () => {
   failMode = 429
   requests.length = 0
   const { out } = await decide(preCall, env({ ACP_AGENT_TIER: 'background' }))
-  assert.equal(out.decision, 'deny')
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
   assert.equal(requests.length, 1)
   failMode = null
 })
@@ -135,7 +149,7 @@ test('missing credential is UNGOVERNED-open with a warning, never a crash', asyn
     ACP_GOVERN_BASE: base,
     HOME: '/nonexistent-home-for-test',
   })
-  assert.deepEqual(out, {})
+  assert.match(out.systemMessage, /UNGOVERNED: no credential/)
   assert.match(warn, /UNGOVERNED: no credential/)
 })
 
@@ -147,8 +161,9 @@ test('PostToolUse block turns into a deny decision', async () => {
     env(),
   )
   assert.equal(requests[0].path, '/govern/tool-output')
-  assert.equal(out.decision, 'deny')
+  assert.equal(out.decision, 'block')
   assert.match(out.reason, /leaked credential/)
+  assert.equal(out.hookSpecificOutput, undefined)
 })
 
 test('PostToolUse gateway failure is a silent pass-through', async () => {
@@ -171,7 +186,7 @@ test('fixture wrapper shape { event, stdin } is accepted', async () => {
   const payload = { hook_event_name: wrapped.event, ...wrapped.stdin }
   const { out } = await decide(payload, env())
   assert.equal(requests[0].body.hook_event_name, 'PreToolUse')
-  assert.equal(out.decision, 'deny')
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
 })
 
 test('receipt message covers counts and links the session', () => {

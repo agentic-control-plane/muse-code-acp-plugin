@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "name": "acp",
+  "displayName": "Agentic Control Plane",
+  "version": "0.1.0",
+  "description": "Policy-check every tool call against your Agentic Control Plane workspace before it runs.",
+  "compat": { "source": "native", "manifestDir": ".muse-plugin" },
+  "capabilities": {
+    "skills": [],
+    "commands": [],
+    "hooks": [
+      { "id": "acp-pre", "event": "PreToolUse", "command": ["node", "hooks/pre.mjs"], "timeoutMs": 10000, "statusMessage": "ACP policy check" },
+      { "id": "acp-permission", "event": "PermissionRequest", "command": ["node", "hooks/permission.mjs"], "timeoutMs": 10000, "statusMessage": "ACP approval routing" },
+      { "id": "acp-post", "event": "PostToolUse", "command": ["node", "hooks/post.mjs"], "timeoutMs": 10000, "statusMessage": "ACP output scan" },
+      { "id": "acp-receipt", "event": "Stop", "command": ["node", "hooks/stop.mjs"], "timeoutMs": 5000, "statusMessage": "ACP session receipt" }
+    ],
+    "mcpServers": [],
+    "reminders": []
+  }
+}

@@ -70,13 +70,15 @@ function lapseLine(fields) {
 }
 
 /**
- * Muse Code has no documented way to tell the hook it is headless; the tier
- * must come from the environment. `muse exec` in CI is where fail-closed
- * matters, and CI is exactly where operators set env vars.
+ * Tier resolution, in trust order: explicit env, config file, CI markers,
+ * then the payload's own permission_mode — `never` means no human is
+ * answering prompts, so an ask has nobody to land on (fail-closed posture).
  */
-function resolveTier(env = process.env) {
+function resolveTier(env = process.env, config = {}, permissionMode) {
   if (env.ACP_AGENT_TIER) return env.ACP_AGENT_TIER
+  if (config.agent_tier) return config.agent_tier
   if (env.CI || env.MUSE_HEADLESS) return 'background'
+  if (permissionMode === 'never') return 'background'
   return 'interactive'
 }
 
@@ -94,16 +96,54 @@ function normalize(payload, env = process.env) {
     toolOutput: pick(payload, 'tool_output', 'toolOutput', 'result', 'output'),
     sessionId: pick(payload, 'session_id', 'sessionId'),
     cwd: pick(payload, 'cwd', 'workspace_root', 'workspaceRoot') ?? process.cwd(),
+    permissionMode: pick(payload, 'permission_mode', 'permissionMode'),
   }
 }
 
-/** Both output vocabularies in one object; unknown keys are ignored. */
-function encodeDecision(kind, reason) {
+/**
+ * Muse Code's verified output contract (probed against 0.2.1's own hook
+ * runner — it is Claude Code's schema, snake_case payload in, camelCase
+ * `hookSpecificOutput` back):
+ *   allow          -> {}                                  (bare allow; an explicit
+ *                                                          "allow" requires updatedInput)
+ *   deny/ask (pre) -> hookSpecificOutput.permissionDecision + Reason
+ *   block (post)   -> { decision: "block", reason }       (feedback the model sees)
+ * Unknown stdout keys FAIL the hook run, so emit nothing speculative.
+ */
+function encodeDecision(kind, reason, event) {
   if (kind === 'allow') return {}
-  const out = { decision: kind === 'deny' ? 'deny' : 'ask', reason }
-  out.permissionDecision = out.decision
-  out.permissionDecisionReason = reason
-  return out
+  if (event === 'PostToolUse') return { decision: 'block', reason }
+  if (event === 'PermissionRequest') {
+    // A PermissionRequest is Muse's own approval already in flight: a policy
+    // deny settles it, and anything else stays out of the way so the native
+    // prompt (or approval judge) proceeds — an ask here would be circular.
+    if (kind !== 'deny') return {}
+    return {
+      hookSpecificOutput: {
+        hookEventName: event,
+        decision: { behavior: 'deny', message: reason },
+      },
+    }
+  }
+  return {
+    hookSpecificOutput: {
+      hookEventName: event,
+      permissionDecision: kind,
+      permissionDecisionReason: reason,
+    },
+  }
+}
+
+/**
+ * Muse Code runs hooks with a cleared environment, so operational overrides
+ * live in ~/.acp/config.json (govern_base, console_base, agent_tier, shadow,
+ * check_timeout_ms). Env still wins when present — tests and other harnesses
+ * pass it through.
+ */
+function readConfig(env = process.env) {
+  try {
+    return JSON.parse(readFileSync(join(acpDir(env), 'config.json'), 'utf8'))
+  } catch { return {} }
 }
 
 async function post(base, headers, path, payload, timeoutMs) {
@@ -158,28 +198,29 @@ export function buildReceiptMessage(stats, sessionId, consoleBase = 'https://clo
 
 export async function decide(payload, env = process.env) {
   const call = normalize(payload, env)
-  const tier = resolveTier(env)
+  const config = readConfig(env)
+  const tier = resolveTier(env, config, call.permissionMode)
   const token = readToken(env)
 
   if (!token) {
     // Loud, once per invocation, plus a durable lapse line — an uncredentialed
     // control plane must never be mistaken for a live one.
     lapseLine({ kind: 'UNGOVERNED', reason: 'no-credentials', tool: call.toolName, session: call.sessionId })
-    return {
-      out: {},
-      warn: '[ACP] ⚠ UNGOVERNED: no credential (ACP_BEARER_TOKEN or ~/.acp/credentials) — '
-        + 'tool calls run WITHOUT policy checks and ACP has no record of them. '
-        + 'Connect at https://cloud.agenticcontrolplane.com',
-    }
+    const warn = '[ACP] ⚠ UNGOVERNED: no credential (ACP_BEARER_TOKEN or ~/.acp/credentials) — '
+      + 'tool calls run WITHOUT policy checks and ACP has no record of them. '
+      + 'Connect at https://cloud.agenticcontrolplane.com'
+    // systemMessage is the one benign key Muse accepts alongside nothing else:
+    // it surfaces in the session as a system line without deciding anything.
+    return { out: { systemMessage: warn }, warn }
   }
 
-  const govern = (env.ACP_GOVERN_BASE ?? env.ACP_API_BASE ?? 'https://govern.agenticcontrolplane.com').replace(/\/$/, '')
+  const govern = (env.ACP_GOVERN_BASE ?? env.ACP_API_BASE ?? config.govern_base ?? 'https://govern.agenticcontrolplane.com').replace(/\/$/, '')
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json',
     'X-GS-Client': `muse-code-hook/${HOOK_VERSION}`,
   }
-  const timeoutMs = Number(env.ACP_CHECK_TIMEOUT_MS) || CHECK_TIMEOUT_MS
+  const timeoutMs = Number(env.ACP_CHECK_TIMEOUT_MS) || Number(config.check_timeout_ms) || CHECK_TIMEOUT_MS
   const base = {
     tool_name: call.toolName,
     tool_input: call.toolInput,
@@ -195,8 +236,8 @@ export async function decide(payload, env = process.env) {
       const p = statsPath(call.sessionId)
       const s = JSON.parse(readFileSync(p, 'utf8'))
       unlinkSync(p)
-      const line = buildReceiptMessage(s, call.sessionId, env.ACP_CONSOLE_BASE)
-      return { out: {}, warn: line ?? undefined }
+      const line = buildReceiptMessage(s, call.sessionId, env.ACP_CONSOLE_BASE ?? config.console_base)
+      return line ? { out: { systemMessage: line }, warn: line } : { out: {} }
     } catch { return { out: {} } }
   }
 
@@ -215,12 +256,12 @@ export async function decide(payload, env = process.env) {
     }
     if (data.action === 'block') {
       bump(call.sessionId, 'denied')
-      return { out: encodeDecision('deny', `[ACP] Blocked: ${data.reason ?? 'policy'}`) }
+      return { out: encodeDecision('deny', `[ACP] Blocked: ${data.reason ?? 'policy'}`, 'PostToolUse') }
     }
-    if (typeof data.notice === 'string' && data.notice.trim() && !/^(off|0|false)$/i.test(env.ACP_SHADOW ?? '')) {
+    if (typeof data.notice === 'string' && data.notice.trim() && !/^(off|0|false)$/i.test(env.ACP_SHADOW ?? config.shadow ?? '')) {
       // Shadow-mode counterfactual (#607): advisory, arrives with action "pass".
       bump(call.sessionId, 'notices')
-      return { out: {}, warn: data.notice }
+      return { out: { systemMessage: data.notice }, warn: data.notice }
     }
     return { out: {} }
   }
@@ -241,37 +282,42 @@ export async function decide(payload, env = process.env) {
     const detail = error?.name === 'AbortError' ? 'request timed out' : (error?.message ?? 'network error')
     if (tier === 'interactive') {
       lapseLine({ kind: 'UNGOVERNED', tool: call.toolName, tier, detail })
-      return {
-        out: {},
-        warn: `[ACP] ⚠ UNGOVERNED: gateway unreachable (${detail}) — ${call.toolName} proceeded WITHOUT policy check. Lapse logged to ~/.acp/lapse.log.`,
-      }
+      const warn = `[ACP] ⚠ UNGOVERNED: gateway unreachable (${detail}) — ${call.toolName} proceeded WITHOUT policy check. Lapse logged to ~/.acp/lapse.log.`
+      return { out: { systemMessage: warn }, warn }
     }
     return {
       out: encodeDecision('deny',
-        `[ACP] Gateway unreachable (${detail}) — ${tier} tier stays blocked when policy can't be consulted (fail-closed for unattended agents; interactive sessions fail open).`),
+        `[ACP] Gateway unreachable (${detail}) — ${tier} tier stays blocked when policy can't be consulted (fail-closed for unattended agents; interactive sessions fail open).`,
+        call.event),
     }
   }
 
   bump(call.sessionId, 'calls')
   if (data.decision === 'deny') {
     bump(call.sessionId, 'denied')
-    return { out: encodeDecision('deny', `[ACP] Denied by policy: ${data.reason ?? 'policy did not return a reason'}`) }
+    return { out: encodeDecision('deny', `[ACP] Denied by policy: ${data.reason ?? 'policy did not return a reason'}`, call.event) }
   }
   if (data.decision === 'ask') {
     bump(call.sessionId, 'asked')
-    return { out: encodeDecision('ask', `[ACP] Approval required: ${data.reason ?? 'approval required'}`) }
+    return { out: encodeDecision('ask', `[ACP] Approval required: ${data.reason ?? 'approval required'}`, call.event) }
   }
-  return { out: {}, warn: data.warning ? String(data.warning) : undefined }
+  if (data.warning) return { out: { systemMessage: String(data.warning) }, warn: String(data.warning) }
+  return { out: {} }
 }
 
-async function main() {
+export async function runHook(fallbackEvent) {
   let raw = ''
   for await (const chunk of process.stdin) raw += chunk
   let payload = {}
   try { payload = JSON.parse(raw) } catch { /* empty or non-JSON stdin — still answer */ }
-  // `muse hooks run --fixture` wraps the payload as { event, stdin: {...} };
+  // `muse plugins hook test --fixture` wraps the payload as { event, stdin: {...} };
   // accept both the wrapped and the live shape.
   if (payload?.stdin && payload?.event) payload = { hook_event_name: payload.event, ...payload.stdin }
+  // Muse requires a distinct source file per hook id, so each per-event
+  // wrapper pins its event here — the payload's own field still wins.
+  if (fallbackEvent && payload.hook_event_name === undefined && payload.event === undefined) {
+    payload.hook_event_name = fallbackEvent
+  }
 
   let result
   try {
@@ -288,5 +334,5 @@ async function main() {
 
 // Only run the CLI when invoked directly — tests import decide() without I/O.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main()
+  runHook()
 }

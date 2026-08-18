@@ -27,17 +27,21 @@ Copy `hooks.example.json` to your project's `.muse/hooks.json` (or your user
 settings), then trust the hooks once the `muse hooks trust` CLI ships in your
 build. Sign in once to get a credential:
 
-- `ACP_BEARER_TOKEN` in the environment, or
 - a key in `~/.acp/credentials` (written by the
   [installer](https://agenticcontrolplane.com/install-explained) — one
   command, free for individuals).
+
+Muse Code runs hooks with a **cleared environment**, so `ACP_BEARER_TOKEN`
+does not reach them in live sessions — the file is the real path. Optional
+operational overrides live in `~/.acp/config.json`: `govern_base`,
+`console_base`, `agent_tier`, `check_timeout_ms`, `shadow`.
 
 ## What it does
 
 | Event | Gateway call | Effect |
 |---|---|---|
 | `PreToolUse` | `POST /govern/tool-use` | allow / ask / deny before the tool runs |
-| `PermissionRequest` | `POST /govern/tool-use` | policy answers Muse's own approval flow |
+| `PermissionRequest` | `POST /govern/tool-use` | a policy deny settles Muse's own approval; anything else lets the native prompt proceed |
 | `PostToolUse` | `POST /govern/tool-output` | output scanning; a server block becomes a deny the model sees |
 | `Stop` | — | one session receipt line with a deep link to the session timeline |
 
