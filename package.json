@@ -8,7 +8,8 @@
   },
   "files": [
     "hook.mjs",
-    "hooks.example.json",
+    "hooks/",
+    ".muse-plugin/",
     "README.md",
     "LICENSE"
   ],
