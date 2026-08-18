@@ -5,27 +5,32 @@ Policy-check every tool call Muse Code makes — before it runs — against your
 ask / deny per call, output scanning after the call, one receipt line per
 session, every decision in your activity log with the reason attached.
 
-## Status: beta-tracking-beta
+## Status: beta-tracking-beta, contract verified
 
-Muse Code is in beta and ships its hook engine ahead of its hook docs: the
-0.2.1 binary carries the full lifecycle event set (`PreToolUse`,
-`PermissionRequest`, `PostToolUse`, `Stop`, …) and the Claude-Code-style
-decision vocabulary, but not yet the documented `muse hooks` management CLI,
-and the exact `hooks.json` schema is unpublished. This hook is built against
-what the binary demonstrably contains, is defensive about field spellings,
-and will be pinned to the published contract the moment it lands. Treat it
-the way you treat Muse Code itself: early, tested, tracking a fast-moving
-target.
+Muse Code is in beta, and in the 0.2.1 binary hooks ship as **plugin
+capabilities** behind the `MUSE_EXPERIMENTAL_PLUGINS` flag (the flag gates
+only the management CLI — installed hooks fire in normal runs). The wire
+contract is Claude Code's hook schema, verified end-to-end against Muse's own
+`muse plugins hook test` runner: snake_case payloads in (`hook_event_name`,
+`tool_name`, `tool_input`, `session_id`, `permission_mode`), camelCase
+`hookSpecificOutput` decisions back, exit 2 + stderr as the fallback block
+channel, `systemMessage` for advisory lines. Two things still await a live
+model run (the offline `echo` provider makes no tool calls): the ask-prompt
+round trip in an interactive session, and the live `PreToolUse` payload —
+its session-level siblings are already confirmed byte-compatible.
 
 ## Install
 
+This package **is** a Muse native plugin bundle (`.muse-plugin/plugin.json`
+at the package root):
+
 ```bash
 npm install -g @agenticcontrolplane/muse-code
+MUSE_EXPERIMENTAL_PLUGINS=1 muse plugins install "$(npm root -g)/@agenticcontrolplane/muse-code" --scope user
+MUSE_EXPERIMENTAL_PLUGINS=1 muse plugins approve acp
 ```
 
-Copy `hooks.example.json` to your project's `.muse/hooks.json` (or your user
-settings), then trust the hooks once the `muse hooks trust` CLI ships in your
-build. Sign in once to get a credential:
+Sign in once to get a credential:
 
 - a key in `~/.acp/credentials` (written by the
   [installer](https://agenticcontrolplane.com/install-explained) — one
