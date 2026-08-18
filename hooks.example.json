@@ -1,0 +1,25 @@
+{
+  "__contract_status": "BEST-GUESS registration shape — the 0.2.1 beta binary ships the hook engine but not the documented `muse hooks` CLI, and the hooks.json schema is not yet published. Muse Code docs specify: one shell command bound to one lifecycle event, keyed entries, project file at <root>/.muse/hooks.json, trust required via `muse hooks trust <key>` once the CLI lands. Update this file the moment the schema is published or empirically confirmed.",
+  "hooks": {
+    "acp-pre": {
+      "event": "PreToolUse",
+      "command": "muse-acp-hook",
+      "timeout_ms": 10000
+    },
+    "acp-permission": {
+      "event": "PermissionRequest",
+      "command": "muse-acp-hook",
+      "timeout_ms": 10000
+    },
+    "acp-post": {
+      "event": "PostToolUse",
+      "command": "muse-acp-hook",
+      "timeout_ms": 10000
+    },
+    "acp-receipt": {
+      "event": "Stop",
+      "command": "muse-acp-hook",
+      "timeout_ms": 5000
+    }
+  }
+}
