@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "acp",
   "displayName": "Agentic Control Plane",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Policy-check every tool call against your Agentic Control Plane workspace before it runs.",
   "compat": { "source": "native", "manifestDir": ".muse-plugin" },
   "capabilities": {

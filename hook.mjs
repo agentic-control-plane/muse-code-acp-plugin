@@ -29,9 +29,10 @@
  * inability to ASK the policy.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 export const HOOK_VERSION = '0.1.0'
 
@@ -332,7 +333,24 @@ export async function runHook(fallbackEvent) {
   process.stdout.write(JSON.stringify(result.out) + '\n')
 }
 
-// Only run the CLI when invoked directly — tests import decide() without I/O.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Only run the CLI when invoked directly — tests import decide() without I/O,
+// and the per-event wrappers in hooks/ import runHook() and call it themselves.
+//
+// npm installs a bin as a SYMLINK in node_modules/.bin (and in the global
+// prefix), so when a user runs `muse-acp-hook` the shell hands us the symlink
+// path in process.argv[1] while import.meta.url is the real file. Comparing
+// the two directly means runHook() never runs through the shim: the command
+// exits 0 with no output. Resolve both sides through realpath first.
+export function isMainEntry(argv1 = process.argv[1], moduleUrl = import.meta.url) {
+  if (!argv1) return false
+  try {
+    return moduleUrl === pathToFileURL(realpathSync(argv1)).href
+  } catch {
+    // argv[1] may be gone or unreadable — never crash on the guard itself.
+    return false
+  }
+}
+
+if (isMainEntry()) {
   runHook()
 }
