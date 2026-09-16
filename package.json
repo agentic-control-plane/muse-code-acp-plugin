@@ -1,6 +1,6 @@
 {
   "name": "@agenticcontrolplane/muse-code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agentic Control Plane hook for Meta Muse Code — allow/ask/deny before every tool call, output scanning after it, one receipt per session.",
   "type": "module",
   "bin": {
