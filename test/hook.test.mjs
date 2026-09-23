@@ -29,7 +29,9 @@ before(async () => {
   base = `http://127.0.0.1:${server.address().port}`
 })
 
-after(() => server.close())
+// Node 18 server.close() waits on keep-alive sockets from fetch; drop them
+// so the test process can exit.
+after(() => { server.closeAllConnections?.(); server.close() })
 
 const env = overrides => ({
   ACP_BEARER_TOKEN: 'test-token',

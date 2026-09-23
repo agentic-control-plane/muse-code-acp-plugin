@@ -95,7 +95,9 @@ before(async () => {
   gatewayBase = `http://127.0.0.1:${server.address().port}`
 })
 
-after(() => server.close())
+// Node 18 server.close() waits on keep-alive sockets from fetch; drop them
+// so the test process can exit.
+after(() => { server.closeAllConnections?.(); server.close() })
 
 // Fresh HOME per call: readToken()/readConfig() resolve ~/.acp under env.HOME,
 // so this keeps the developer machine's real ~/.acp/credentials, config.json
