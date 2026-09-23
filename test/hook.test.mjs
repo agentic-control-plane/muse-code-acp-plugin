@@ -26,6 +26,9 @@ before(async () => {
     })
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  // Node 18 runs a file's root after() only once the event loop drains, which
+  // a listening server prevents: unref it so the file can finish.
+  server.unref()
   base = `http://127.0.0.1:${server.address().port}`
 })
 
