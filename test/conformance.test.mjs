@@ -92,12 +92,13 @@ before(async () => {
     })
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  // Node 18 runs a file's root after() only once the event loop drains, which
+  // a listening server prevents: unref it so the file can finish.
+  server.unref()
   gatewayBase = `http://127.0.0.1:${server.address().port}`
 })
 
-// Node 18 server.close() waits on keep-alive sockets from fetch; drop them
-// so the test process can exit.
-after(() => { server.closeAllConnections?.(); server.close() })
+after(() => server.close())
 
 // Fresh HOME per call: readToken()/readConfig() resolve ~/.acp under env.HOME,
 // so this keeps the developer machine's real ~/.acp/credentials, config.json
