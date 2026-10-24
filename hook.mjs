@@ -34,7 +34,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-export const HOOK_VERSION = '0.1.0'
+export const HOOK_VERSION = '0.1.2'
 
 /** 200 KB ceiling on tool output sent for post-hoc scanning (matches the backend). */
 const POST_HOOK_PAYLOAD_CEILING = 200 * 1024
@@ -60,15 +60,45 @@ function readToken(env = process.env) {
   return null
 }
 
-function lapseLine(fields) {
+function lapseLine(fields, env = process.env) {
   try {
-    mkdirSync(ACP_DIR, { recursive: true })
+    const dir = acpDir(env)
+    mkdirSync(dir, { recursive: true })
     appendFileSync(
-      join(ACP_DIR, 'lapse.log'),
+      join(dir, 'lapse.log'),
       JSON.stringify({ at: new Date().toISOString(), client: 'muse-code-hook', ...fields }) + '\n',
     )
   } catch { /* the lapse log is best-effort — never block a call on it */ }
 }
+
+// True the first time the workspace-deleted notice is asked for in a session,
+// false after (gatewaystack-connect#1693, ported from claude-code-acp-plugin
+// 0.29.3). With no session id, at most once per 24h via a timestamp marker.
+// Fails toward showing the notice: an unwritable marker means it repeats,
+// not vanishes.
+const DELETED_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000
+function firstDeletedNoticeThisSession(sessionId, env = process.env) {
+  const dir = join(acpDir(env), 'notices')
+  const id = String(sessionId ?? '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)
+  try {
+    mkdirSync(dir, { recursive: true })
+    if (!id || id === 'unknown') {
+      const marker = join(dir, 'workspace-deleted.no-session')
+      let last = 0
+      try { last = Date.parse(readFileSync(marker, 'utf8').trim()) || 0 } catch { /* absent */ }
+      if (Date.now() - last < DELETED_NOTICE_WINDOW_MS) return false
+      writeFileSync(marker, new Date().toISOString())
+      return true
+    }
+    writeFileSync(join(dir, `workspace-deleted.${id}`), new Date().toISOString(), { flag: 'wx' })
+    return true
+  } catch (e) {
+    return e?.code !== 'EEXIST'
+  }
+}
+
+const KEY_FIX = 'Fix: re-run the installer (curl -sf https://agenticcontrolplane.com/install.sh | bash) or create a key at https://cloud.agenticcontrolplane.com/settings/api-keys and save it: echo \'gsk_...\' > ~/.acp/credentials'
+const DELETED_FIX = 'The ACP workspace this machine was connected to has been deleted. To remove ACP from this machine: acp-uninstall (older installs without it: curl -sf https://agenticcontrolplane.com/uninstall.sh | bash). To keep using ACP, re-run the installer: curl -sf https://agenticcontrolplane.com/install.sh | bash'
 
 /**
  * Tier resolution, in trust order: explicit env, config file, CI markers,
@@ -160,6 +190,11 @@ async function post(base, headers, path, payload, timeoutMs) {
       // limit it is reporting.
       const err = new Error(`HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`)
       err.httpStatus = res.status
+      if (res.status >= 400 && res.status < 500) {
+        // A 4xx body may carry a machine-readable `code` (workspace_deleted).
+        const errBody = await res.json().catch(() => null)
+        if (typeof errBody?.code === 'string') err.acpCode = errBody.code
+      }
       throw err
     }
     return await res.json()
@@ -280,9 +315,33 @@ export async function decide(payload, env = process.env) {
       data = await post(govern, headers, '/govern/tool-use', base, timeoutMs)
     }
   } catch (error) {
+    // A 401/403 is NOT the gateway being down — it is this machine's key being
+    // revoked, mistyped, or from a deleted workspace. Reading it as "gateway
+    // unreachable" left a user running ungoverned for hours believing it was
+    // our outage. Same tier posture as an outage (interactive fails open,
+    // unattended stays blocked), but the message names the cause and the fix.
+    // `code: "workspace_deleted"`: the owner deleted the workspace on purpose —
+    // say so once per session with how to remove ACP, then proceed silently.
+    // (gatewaystack-connect#1693, ported from claude-code-acp-plugin 0.29.3.)
+    const status = error?.httpStatus
+    if (status === 401 || status === 403) {
+      const deleted = error.acpCode === 'workspace_deleted'
+      const fix = deleted ? DELETED_FIX : KEY_FIX
+      if (tier === 'interactive') {
+        lapseLine({ kind: 'UNGOVERNED', tool: call.toolName, tier, detail: `key rejected (HTTP ${status})` }, env)
+        if (deleted && !firstDeletedNoticeThisSession(call.sessionId, env)) return { out: {} }
+        const warn = `[ACP] ⚠ KEY REJECTED (HTTP ${status}): the key in ~/.acp/credentials is revoked or invalid — this call proceeded UNGOVERNED and unlogged, and every call will until it is fixed. ${fix}`
+        return { out: { systemMessage: warn }, warn }
+      }
+      return {
+        out: encodeDecision('deny',
+          `[ACP] Key rejected (HTTP ${status}) — the key in ~/.acp/credentials is revoked or invalid; ${tier} tier stays blocked until it is fixed. ${fix}`,
+          call.event),
+      }
+    }
     const detail = error?.name === 'AbortError' ? 'request timed out' : (error?.message ?? 'network error')
     if (tier === 'interactive') {
-      lapseLine({ kind: 'UNGOVERNED', tool: call.toolName, tier, detail })
+      lapseLine({ kind: 'UNGOVERNED', tool: call.toolName, tier, detail }, env)
       const warn = `[ACP] ⚠ UNGOVERNED: gateway unreachable (${detail}) — ${call.toolName} proceeded WITHOUT policy check. Lapse logged to ~/.acp/lapse.log.`
       return { out: { systemMessage: warn }, warn }
     }
