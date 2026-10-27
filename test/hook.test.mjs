@@ -200,3 +200,35 @@ test('receipt message covers counts and links the session', () => {
   assert.match(line, /sessions\/sess-9/)
   assert.equal(buildReceiptMessage({ calls: 0 }, 'sess-9'), null)
 })
+
+test('#1518 attended: claim true for a prompting mode, with source and mode', async () => {
+  nextResponse = { decision: 'allow' }
+  requests.length = 0
+  await decide({ ...preCall, permission_mode: 'default' }, env())
+  assert.deepEqual(requests[0].body.attended, { claim: true, source: 'permission_mode', mode: 'default' })
+})
+
+test('#1518 attended: permission_mode never is claim:false; tier env does not set the claim', async () => {
+  requests.length = 0
+  await decide({ ...preCall, permission_mode: 'never' }, env({ ACP_AGENT_TIER: 'interactive' }))
+  assert.deepEqual(requests[0].body.attended, { claim: false, source: 'permission_mode', mode: 'never' })
+  requests.length = 0
+  await decide({ ...preCall, permission_mode: 'default' }, env({ ACP_AGENT_TIER: 'background' }))
+  assert.equal(requests[0].body.attended.claim, true)
+})
+
+test('#1518 attended: absent without permission_mode; native_ask never declared', async () => {
+  requests.length = 0
+  await decide(preCall, env())
+  assert.equal(requests[0].body.attended, undefined)
+  await decide({ ...preCall, permission_mode: 'default' }, env())
+  assert.equal(requests[1].body.capabilities, undefined)
+})
+
+test('#1518 attended: nothing on PostToolUse', async () => {
+  requests.length = 0
+  await decide({ ...preCall, hook_event_name: 'PostToolUse', tool_output: 'x', permission_mode: 'default' }, env())
+  assert.equal(requests[0].path, '/govern/tool-output')
+  assert.equal(requests[0].body.attended, undefined)
+  assert.equal(requests[0].body.capabilities, undefined)
+})
