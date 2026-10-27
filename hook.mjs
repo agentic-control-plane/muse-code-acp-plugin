@@ -265,6 +265,14 @@ export async function decide(payload, env = process.env) {
     hook_event_name: call.event,
     agent_tier: tier,
   }
+  // #1518 attended signal: the payload's own permission_mode is the honest
+  // runtime signal ("never" = nobody answers prompts). Sent on PreToolUse and
+  // PermissionRequest only, when the mode is a non-empty string. No native_ask:
+  // the ask-prompt round trip is unverified (README), so it is not declared.
+  const mode = call.permissionMode
+  if (call.event !== 'PostToolUse' && call.event !== 'Stop' && typeof mode === 'string' && mode !== '') {
+    base.attended = { claim: mode !== 'never', source: 'permission_mode', mode }
+  }
 
   if (call.event === 'Stop') {
     // Session end: emit the receipt and clear the counter file.
